@@ -3,13 +3,26 @@
 use buffer::Buffer;
 use errors::*;
 use std::io;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use syntect::parsing::{SyntaxDefinition, SyntaxSet};
 
 /// Returned as the item in the iterator returned by Workspace::iter_buffers
+///
+/// Note: This item implements the Deref trait so members of Buffer can be
+/// accessed as if it was the real thing.
 pub struct BufferItem<'a> {
+    index: usize,
     workspace: &'a Workspace,
-    pub buffer: &'a Buffer,
+    buffer: &'a Buffer,
+}
+
+impl<'a> ::std::ops::Deref for BufferItem<'a> {
+    type Target = Buffer;
+
+    fn deref(&self) -> &Buffer {
+        self.buffer
+    }
 }
 
 impl<'a> BufferItem<'a> {
@@ -22,9 +35,9 @@ impl<'a> BufferItem<'a> {
             )
     }
 
-    /// Return Buffer::data()
-    pub fn data(&self) -> String {
-        self.buffer.data()
+    /// Make this buffer the currently selected one in the workspace
+    pub fn make_current(&self) {
+        self.workspace.current_buffer_index.set(Some(self.index));
     }
 }
 
@@ -34,7 +47,7 @@ pub struct Workspace {
     pub path: PathBuf,
     buffers: Vec<Buffer>,
     next_buffer_id: usize,
-    current_buffer_index: Option<usize>,
+    current_buffer_index: Cell<Option<usize>>,
     pub syntax_set: SyntaxSet,
 }
 
@@ -49,7 +62,7 @@ impl Workspace {
             path: try!(path.canonicalize()),
             buffers: Vec::new(),
             next_buffer_id: 0,
-            current_buffer_index: None,
+            current_buffer_index: Cell::new(None),
             syntax_set,
         })
     }
@@ -84,7 +97,7 @@ impl Workspace {
         self.next_buffer_id += 1;
 
         // The target index is directly after the current buffer's index.
-        let target_index = self.current_buffer_index.map(|i| i + 1 ).unwrap_or(0);
+        let target_index = self.current_buffer_index.get().map(|i| i + 1 ).unwrap_or(0);
 
         // Add a syntax definition to the buffer, if it doesn't already have one.
         if buf.syntax_definition.is_none() {
@@ -93,7 +106,7 @@ impl Workspace {
 
         // Insert the buffer and select it.
         self.buffers.insert(target_index, buf);
-        self.current_buffer_index = Some(target_index);
+        self.current_buffer_index.set(Some(target_index));
     }
 
     /// Opens a buffer at the specified path, *inserting
@@ -171,7 +184,7 @@ impl Workspace {
     /// let buffer_reference = workspace.current_buffer().unwrap();
     /// ```
     pub fn current_buffer(&mut self) -> Option<&mut Buffer> {
-        match self.current_buffer_index {
+        match self.current_buffer_index.get() {
             Some(index) => Some(&mut self.buffers[index]),
             None => None,
         }
@@ -204,7 +217,7 @@ impl Workspace {
     /// assert_eq!(workspace.current_buffer_path(), Some(Path::new("file")));
     /// ```
     pub fn current_buffer_path(&self) -> Option<&Path> {
-        self.current_buffer_index
+        self.current_buffer_index.get()
           .and_then(|i| self.buffers[i].path.as_ref()
               .and_then(|path| path.strip_prefix(&self.path).ok()
                   .or_else(|| Some(path))
@@ -237,13 +250,13 @@ impl Workspace {
     /// workspace.close_current_buffer();
     /// ```
     pub fn close_current_buffer(&mut self) {
-        if let Some(index) = self.current_buffer_index {
+        if let Some(index) = self.current_buffer_index.get() {
             self.buffers.remove(index);
 
             if self.buffers.is_empty() {
-                self.current_buffer_index = None;
+                self.current_buffer_index.set(None);
             } else {
-                self.current_buffer_index = index.checked_sub(1).or(Some(0));
+                self.current_buffer_index.set(index.checked_sub(1).or(Some(0)));
             }
         };
     }
@@ -274,12 +287,12 @@ impl Workspace {
     /// workspace.previous_buffer();
     /// ```
     pub fn previous_buffer(&mut self) {
-        match self.current_buffer_index {
+        match self.current_buffer_index.get() {
             Some(index) => {
                 if index > 0 {
-                    self.current_buffer_index = Some(index-1);
+                    self.current_buffer_index.set(Some(index-1));
                 } else {
-                    self.current_buffer_index = Some(self.buffers.len()-1);
+                    self.current_buffer_index.set( Some(self.buffers.len()-1));
                 }
             },
             None => return,
@@ -312,12 +325,12 @@ impl Workspace {
     /// workspace.next_buffer();
     /// ```
     pub fn next_buffer(&mut self) {
-        match self.current_buffer_index {
+        match self.current_buffer_index.get() {
             Some(index) => {
                 if index == self.buffers.len()-1 {
-                    self.current_buffer_index = Some(0);
+                    self.current_buffer_index.set(Some(0));
                 } else {
-                    self.current_buffer_index = Some(index+1);
+                    self.current_buffer_index.set(Some(index+1));
                 }
             },
             None => return,
@@ -355,17 +368,13 @@ impl Workspace {
     /// assert_eq!(it.next(), None);
     /// ```
     pub fn iter_buffers<'a>(&'a self) -> impl Iterator<Item=BufferItem<'a>> {
-        let (remain, start) = match self.current_buffer_index {
-            Some(index) => {
-                self.buffers.split_at(index)
-            },
-            None => {
-                (&[][..], &[][..])
-            },
-        };
+        let workspace = self;
+        let index = self.current_buffer_index.get().unwrap_or(0);
+        let first_part = self.buffers.iter().enumerate().skip(index);
+        let second_part = self.buffers.iter().enumerate().take(index);
 
-        start.iter().chain(remain)
-            .map(move |b| BufferItem { workspace: self, buffer: b })
+        first_part.chain(second_part)
+            .map(move |(index, buffer)| BufferItem { index, workspace, buffer })
     }
 
     /// Whether or not the workspace contains a buffer with the specified path.
@@ -447,7 +456,7 @@ impl Workspace {
     ///
     /// ```
     pub fn update_current_syntax(&mut self) -> Result<()> {
-        let index = self.current_buffer_index.ok_or(ErrorKind::EmptyWorkspace)?;
+        let index = self.current_buffer_index.get().ok_or(ErrorKind::EmptyWorkspace)?;
         let syntax_definition = self.find_syntax_definition(&self.buffers[index]);
         let buffer = &mut self.buffers[index];
         buffer.syntax_definition = syntax_definition;
@@ -632,7 +641,7 @@ mod tests {
         workspace.add_buffer(Buffer::new());
         workspace.close_current_buffer();
         assert!(workspace.current_buffer().is_none());
-        assert!(workspace.current_buffer_index.is_none());
+        assert!(workspace.current_buffer_index.get().is_none());
     }
 
     #[test]
@@ -781,18 +790,65 @@ mod tests {
         // Ensure that the third buffer is currently selected.
         assert_eq!(workspace.current_buffer().unwrap().data(), "third buffer");
 
-        let mut it = workspace.iter_buffers();
+        {
+            let mut it = workspace.iter_buffers();
 
-        // Ensure that the third buffer is returned first.
-        assert_eq!(it.next().unwrap().data(), "third buffer");
+            // Ensure that the third buffer is returned first.
+            assert_eq!(it.next().unwrap().data(), "third buffer");
 
-        // Ensure that it wraps back to the first buffer.
-        assert_eq!(it.next().unwrap().data(), "first buffer");
+            // Ensure that it wraps back to the first buffer.
+            assert_eq!(it.next().unwrap().data(), "first buffer");
 
-        // Ensure that the second buffer is returned.
-        assert_eq!(it.next().unwrap().data(), "second buffer");
+            // Ensure that the second buffer is returned.
+            assert_eq!(it.next().unwrap().data(), "second buffer");
 
-        // Ensure we reached the end
-        assert!(it.next().is_none());
+            // Ensure we reached the end
+            assert!(it.next().is_none());
+        }
+
+        // Ensure that the third buffer is still selected.
+        assert_eq!(workspace.current_buffer().unwrap().data(), "third buffer");
+    }
+
+    #[test]
+    fn iter_buffers_when_three_are_open_make_second_current() {
+        let mut workspace = Workspace::new(Path::new("tests/sample")).unwrap();
+
+        // Create two buffers and add them to the workspace.
+        let mut first_buffer = Buffer::new();
+        let mut second_buffer = Buffer::new();
+        let mut third_buffer = Buffer::new();
+        first_buffer.insert("first buffer");
+        second_buffer.insert("second buffer");
+        third_buffer.insert("third buffer");
+        workspace.add_buffer(first_buffer);
+        workspace.add_buffer(second_buffer);
+        workspace.add_buffer(third_buffer);
+
+        // Ensure that the third buffer is currently selected.
+        assert_eq!(workspace.current_buffer().unwrap().data(), "third buffer");
+
+        {
+            let mut it = workspace.iter_buffers();
+
+            // Ensure that the third buffer is returned first.
+            assert_eq!(it.next().unwrap().data(), "third buffer");
+
+            // Ensure that it wraps back to the first buffer.
+            assert_eq!(it.next().unwrap().data(), "first buffer");
+
+            // Ensure that the second buffer is returned.
+            {
+                let buffer = it.next().unwrap();
+                buffer.make_current();
+                assert_eq!(buffer.data(), "second buffer");
+            }
+
+            // Ensure we reached the end
+            assert!(it.next().is_none());
+        }
+
+        // Ensure that the second buffer is currently selected.
+        assert_eq!(workspace.current_buffer().unwrap().data(), "second buffer");
     }
 }
