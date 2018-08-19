@@ -6,6 +6,28 @@ use std::io;
 use std::path::{Path, PathBuf};
 use syntect::parsing::{SyntaxDefinition, SyntaxSet};
 
+/// Returned as the item in the iterator returned by Workspace::iter_buffers
+pub struct BufferItem<'a> {
+    workspace: &'a Workspace,
+    pub buffer: &'a Buffer,
+}
+
+impl<'a> BufferItem<'a> {
+    /// Return the path of the buffer following the same logic as
+    /// Workspace::current_buffer_path
+    pub fn get_path(&self) -> Option<&'a Path> {
+        self.buffer.path.as_ref()
+            .and_then(|path| path.strip_prefix(&self.workspace.path).ok()
+                .or(Some(path))
+            )
+    }
+
+    /// Return Buffer::data()
+    pub fn data(&self) -> String {
+        self.buffer.data()
+    }
+}
+
 /// An owned collection of buffers and associated path,
 /// representing a running editor environment.
 pub struct Workspace {
@@ -300,6 +322,50 @@ impl Workspace {
             },
             None => return,
         }
+    }
+
+    /// Iterate all buffers starting with the current one
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scribe::Buffer;
+    /// use scribe::Workspace;
+    /// use std::path::Path;
+    ///
+    /// // Set up the paths we'll use.
+    /// let directory_path = Path::new("tests/sample");
+    /// let file_path = Path::new("tests/sample/file");
+    ///
+    /// // Create a workspace.
+    /// let mut workspace = Workspace::new(directory_path).unwrap();
+    ///
+    /// // Add a buffer to the workspace.
+    /// let buf = Buffer::from_file(file_path.clone()).unwrap();
+    /// workspace.add_buffer(buf);
+    ///
+    /// // Add an empty buffer to the workspace
+    /// workspace.add_buffer(Buffer::new());
+    ///
+    /// // Iterate trough the buffers
+    /// let mut it = workspace.iter_buffers()
+    ///     .map(|b| b.get_path());
+    /// assert_eq!(it.next(), Some(None));
+    /// assert_eq!(it.next(), Some(Some(Path::new("file"))));
+    /// assert_eq!(it.next(), None);
+    /// ```
+    pub fn iter_buffers<'a>(&'a self) -> impl Iterator<Item=BufferItem<'a>> {
+        let (remain, start) = match self.current_buffer_index {
+            Some(index) => {
+                self.buffers.split_at(index)
+            },
+            None => {
+                (&[][..], &[][..])
+            },
+        };
+
+        start.iter().chain(remain)
+            .map(move |b| BufferItem { workspace: self, buffer: b })
     }
 
     /// Whether or not the workspace contains a buffer with the specified path.
@@ -689,5 +755,44 @@ mod tests {
         // Ensure that the third buffer is returned.
         workspace.next_buffer();
         assert_eq!(workspace.current_buffer().unwrap().data(), "third buffer");
+    }
+
+    #[test]
+    fn iter_buffers_does_nothing_when_no_buffers_are_open() {
+        let workspace = Workspace::new(Path::new("tests/sample")).unwrap();
+        assert!(workspace.iter_buffers().next().is_none());
+    }
+
+    #[test]
+    fn iter_buffers_when_three_are_open_selects_next_wrapping_to_first() {
+        let mut workspace = Workspace::new(Path::new("tests/sample")).unwrap();
+
+        // Create two buffers and add them to the workspace.
+        let mut first_buffer = Buffer::new();
+        let mut second_buffer = Buffer::new();
+        let mut third_buffer = Buffer::new();
+        first_buffer.insert("first buffer");
+        second_buffer.insert("second buffer");
+        third_buffer.insert("third buffer");
+        workspace.add_buffer(first_buffer);
+        workspace.add_buffer(second_buffer);
+        workspace.add_buffer(third_buffer);
+
+        // Ensure that the third buffer is currently selected.
+        assert_eq!(workspace.current_buffer().unwrap().data(), "third buffer");
+
+        let mut it = workspace.iter_buffers();
+
+        // Ensure that the third buffer is returned first.
+        assert_eq!(it.next().unwrap().data(), "third buffer");
+
+        // Ensure that it wraps back to the first buffer.
+        assert_eq!(it.next().unwrap().data(), "first buffer");
+
+        // Ensure that the second buffer is returned.
+        assert_eq!(it.next().unwrap().data(), "second buffer");
+
+        // Ensure we reached the end
+        assert!(it.next().is_none());
     }
 }
