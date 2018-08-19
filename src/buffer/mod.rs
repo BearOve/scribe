@@ -167,6 +167,11 @@ impl Buffer {
     /// # use std::path::{Path, PathBuf};
     /// # use std::fs::File;
     /// # use std::io::Read;
+    /// #
+    /// # let org_dir = std::env::current_dir().unwrap();
+    /// # // Note: This should really be env!("OUT_DIR") or
+    /// # // std::env::var("OUT_DIR"), but that doesn't work
+    /// # std::env::set_current_dir("target");
     ///
     /// // Set up a buffer and point it to a path.
     /// let mut buffer = Buffer::new();
@@ -183,6 +188,7 @@ impl Buffer {
     /// # assert_eq!(saved_data, "scribe");
     ///
     /// # std::fs::remove_file(&write_path);
+    /// # std::env::set_current_dir(org_dir);
     /// ```
     pub fn save(&mut self) -> io::Result<()> {
         // Try to open and write to the file, returning any errors encountered.
