@@ -31,7 +31,7 @@ impl<'a> BufferItem<'a> {
     pub fn get_path(&self) -> Option<&'a Path> {
         self.buffer.path.as_ref()
             .and_then(|path| path.strip_prefix(&self.workspace.path).ok()
-                .or(Some(path))
+                .or_else(|| Some(path))
             )
     }
 
@@ -367,7 +367,7 @@ impl Workspace {
     /// assert_eq!(it.next(), Some(Some(Path::new("file"))));
     /// assert_eq!(it.next(), None);
     /// ```
-    pub fn iter_buffers<'a>(&'a self) -> impl Iterator<Item=BufferItem<'a>> {
+    pub fn iter_buffers(&self) -> impl Iterator<Item=BufferItem> {
         let workspace = self;
         let index = self.current_buffer_index.get().unwrap_or(0);
         let first_part = self.buffers.iter().enumerate().skip(index);
